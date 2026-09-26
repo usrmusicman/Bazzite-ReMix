@@ -1,0 +1,5 @@
+# Clean Wine environment overrides using $HOME
+export PATH="$HOME/.local/bin/wine/bin:$PATH"
+export WINELOADER="$HOME/.local/bin/wine/bin/wine"
+export WINESERVER="$HOME/.local/bin/wine/bin/wineserver"
+export WINEDLLPATH="$HOME/.local/bin/wine/lib"

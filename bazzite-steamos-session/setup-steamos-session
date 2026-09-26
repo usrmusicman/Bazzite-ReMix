@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Ensure script is run with superuser privileges
+if [ "$EUID" -ne 0 ]; then
+  echo "Error: This script must be run as root (use sudo)." >&2
+  exit 1
+fi
+
+# Determine source root directory relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="${SCRIPT_DIR}/root"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+  -i, --install     Install files to system root (/) and enable getty@tty1 autologin
+  -u, --uninstall   Remove installed files and disable getty@tty1 autologin
+  -h, --help        Display this help message
+EOF
+  exit 1
+}
+
+install_session() {
+  if [ ! -d "$SOURCE_ROOT" ]; then
+    echo "Error: Directory '$SOURCE_ROOT' not found." >&2
+    exit 1
+  fi
+
+  echo "==> Installing files using 'install' with explicit permissions..."
+
+  # 1. Executables in /usr/local/bin/steamos-session (755)
+  install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/gamescope-app-launcher" \
+                 "/usr/local/bin/steamos-session/gamescope-app-launcher"
+  install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/steamos-profile-switcher" \
+                 "/usr/local/bin/steamos-session/steamos-profile-switcher"
+  install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/steamos-session-launcher" \
+                 "/usr/local/bin/steamos-session/steamos-session-launcher"
+  install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/steamos-session-select" \
+                 "/usr/local/bin/steamos-session/steamos-session-select"
+
+  # 2. Config Files in /usr/local/bin/steamos-session/config/bash (644)
+  install -Dm644 "$SOURCE_ROOT/usr/local/bin/steamos-session/config/bash/.bash_profile.gamepadui" \
+                 "/usr/local/bin/steamos-session/config/bash/.bash_profile.gamepadui"
+  install -Dm644 "$SOURCE_ROOT/usr/local/bin/steamos-session/config/bash/.bash_profile.normal" \
+                 "/usr/local/bin/steamos-session/config/bash/.bash_profile.normal"
+
+  # 3. Desktop Applications (644)
+  install -Dm644 "$SOURCE_ROOT/usr/local/share/applications/steamos3-gamepadui.desktop" \
+                 "/usr/local/share/applications/steamos3-gamepadui.desktop"
+
+  echo "==> Installation complete!"
+}
+
+uninstall_session() {
+  echo "==> Removing installed files..."
+
+  # Remove binaries, scripts, configs, and modules
+  rm -rf /usr/local/bin/steamos-session
+
+  # Remove desktop entries
+  rm -f /usr/local/share/applications/steamos3-deck-session.desktop
+  rm -f /usr/local/share/applications/steamos3-normal-session.desktop
+
+  echo "==> Uninstallation complete!"
+}
+
+# CLI Argument Parsing
+if [ $# -eq 0 ]; then
+  usage
+fi
+
+case "$1" in
+  -i|--install|install)
+    install_session
+    ;;
+  -u|--uninstall|uninstall)
+    uninstall_session
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Error: Unknown argument '$1'" >&2
+    usage
+    ;;
+esac

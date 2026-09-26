@@ -1,0 +1,980 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Bazzite Audio Manager
+# GUI frontend and execution suite for Bazzite / Fedora Pro Audio configuration
+# ==============================================================================
+
+# --------------------------
+# USER & CONFIGURATION
+# --------------------------
+
+# Identify actual logged-in user when running via sudo
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+REAL_HOME="${REAL_HOME:-/home/$REAL_USER}"
+USER_UID=$(id -u "$REAL_USER" 2>/dev/null || echo 1000)
+
+# Ensure PipeWire commands target the user session even under sudo
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USER_UID}"
+
+# Path for SteamOS / Bazzite session configs
+STEAMOS_SESSION_CONFIG="$REAL_HOME/.config/steamos-session/steamos-session-config"
+
+# Output formatting colors
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YLW='\033[1;33m'
+BLU='\033[0;34m'
+CYN='\033[0;36m'
+NC='\033[0m'
+
+# Default RT Priorities
+RT_PRIO_USB=${RT_PRIO_USB:-90}
+RT_PRIO_PIPEWIRE=${RT_PRIO_PIPEWIRE:-90}
+RT_PRIO_SOUND=${RT_PRIO_SOUND:-85}
+
+# Load session config if available; otherwise, the script uses the hardcoded defaults above
+if [[ -f "$STEAMOS_SESSION_CONFIG" ]]; then
+    source "$STEAMOS_SESSION_CONFIG"
+else
+    echo -e "${YLW}WARNING: Session config not found, using built-in defaults${NC}"
+fi
+
+SCRIPT_PATH="$(readlink -f "$0")"
+
+# --------------------------
+# LOGGING HELPERS
+# --------------------------
+
+notify()  { echo -e "${BLU}[INFO]${NC} $1"; }
+confirm() { echo -e "${GRN}[OK]${NC} $1"; }
+log_msg() { echo -e "${YLW}[LOG]${NC} $1"; }
+warn()    { echo -e "${RED}[WARN]${NC} $1"; }
+
+is_immutable() {
+    if [[ -f /etc/os-release ]]; then
+        grep -qE "VARIANT_ID=(bazzite|silverblue|kinoite|sericea|onyx)" /etc/os-release || command -v rpm-ostree &>/dev/null
+    else
+        return 1
+    fi
+}
+
+show_help() {
+    echo "Usage: $(basename "$0") [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -s, --setup, --install             Execute initial Bazzite pro-audio setup"
+    echo "  -u, --uninstall                    Undo and remove initial Bazzite pro-audio setup"
+    echo "  -r, --rt <on|off>                  Enable or disable real-time priorities"
+    echo "  -q, --quantum <buffer_size>        Force PipeWire quantum buffer size"
+    echo "  -a, --rate <sample_rate>           Force PipeWire sample rate (Hz)"
+    echo "  -l, --launch <binary_path>         Launch application with PIPEWIRE_LATENCY & pw-jack"
+    echo "  -p, --pipeasio-mgr                 Launch PipeASIO Manager AppImage via \$PIPEASIO_MANAGER_PATH"
+    echo "  --pipeasio-app <script> <exe_path> Launch Windows app using PipeASIO prefix launch script"
+    echo "  --yabridge-add <dir_path>          Add plugin path to yabridgectl"
+    echo "  --yabridge-rm <dir_path>           Remove plugin path from yabridgectl"
+    echo "  --yabridge-sync                    Synchronize yabridgectl plugin bridges"
+    echo "  -m, --config-details               Display hardware, audio stack, & yabridge status"
+    echo "  -h, --help                         Show this help menu"
+}
+
+# --------------------------
+# TERMINAL DISPATCH HELPER
+# --------------------------
+
+launch_in_terminal() {
+    local cmd="$1"
+    local title="${2:-Bazzite Audio Action}"
+
+    local tmp_script
+    tmp_script=$(mktemp /tmp/audio_mgr_XXXXXX.sh)
+    chmod +x "$tmp_script"
+
+    cat << EOF > "$tmp_script"
+#!/usr/bin/env bash
+echo -e "${CYN}============================================================${NC}"
+echo -e "${CYN} Bazzite Audio Session Manager: $title ${NC}"
+echo -e "${CYN}============================================================${NC}\n"
+$cmd
+echo ""
+read -p "Press [Enter] to close this window..."
+EOF
+
+    if command -v xdg-terminal-exec &>/dev/null; then
+        xdg-terminal-exec "$tmp_script"
+    elif command -v ptyxis &>/dev/null; then
+        ptyxis -- "$tmp_script"
+    elif command -v konsole &>/dev/null; then
+        konsole -e "$tmp_script"
+    elif command -v gnome-terminal &>/dev/null; then
+        gnome-terminal -- "$tmp_script"
+    elif command -v xfce4-terminal &>/dev/null; then
+        xfce4-terminal -e "$tmp_script"
+    elif command -v alacritty &>/dev/null; then
+        alacritty -e "$tmp_script"
+    elif command -v kitty &>/dev/null; then
+        kitty "$tmp_script"
+    elif command -v xterm &>/dev/null; then
+        xterm -e "$tmp_script"
+    else
+        bash "$tmp_script"
+    fi
+
+    ( sleep 5 && rm -f "$tmp_script" ) &
+}
+
+# --------------------------
+# GUI DIALOG & CHOOSER WRAPPERS
+# Order: kdialog -> zenity -> CLI Fallback
+# --------------------------
+
+gui_menu() {
+    local title="$1"
+    local prompt="$2"
+    shift 2
+
+    if command -v kdialog &>/dev/null; then
+        kdialog --title "$title" --menu "$prompt" "$@" 2>/dev/null
+    elif command -v zenity &>/dev/null; then
+        local zen_args=()
+        while [[ $# -gt 0 ]]; do
+            zen_args+=("$1" "$2")
+            shift 2
+        done
+        zenity --list --title="$title" --text="$prompt" --column="ID" --column="Option" --hide-column=1 "${zen_args[@]}" 2>/dev/null
+    else
+        echo -e "\n=== $title ==="
+        echo -e "$prompt\n"
+        local options=()
+        local tags=()
+        local i=1
+        while [[ $# -gt 0 ]]; do
+            tags+=("$1")
+            options+=("$2")
+            echo "$i) $2"
+            shift 2
+            ((i++))
+        done
+        echo ""
+        read -p "Select choice [1-${#options[@]}]: " choice
+        if [[ "$choice" -ge 1 && "$choice" -le "${#options[@]}" ]]; then
+            echo "${tags[$((choice-1))]}"
+        fi
+    fi
+}
+
+gui_file_chooser() {
+    local title="$1"
+    local filter_pattern="$2"
+    local start_dir="${3:-$REAL_HOME}"
+    local file_result=""
+
+    if command -v kdialog &>/dev/null; then
+        if [[ -n "$filter_pattern" ]]; then
+            file_result=$(kdialog --title "$title" --getopenfilename "$start_dir" "$filter_pattern" 2>/dev/null)
+        else
+            file_result=$(kdialog --title "$title" --getopenfilename "$start_dir" 2>/dev/null)
+        fi
+    elif command -v zenity &>/dev/null; then
+        local zen_filter=()
+        if [[ -n "$filter_pattern" ]]; then
+            zen_filter=(--file-filter="Allowed files | $filter_pattern")
+        fi
+        file_result=$(zenity --file-selection --title="$title" --filename="$start_dir/" "${zen_filter[@]}" 2>/dev/null)
+    else
+        echo -e "\n=== $title ==="
+        echo -e "Starting directory: $start_dir"
+        read -e -p "Enter full absolute path to file: " file_result
+    fi
+
+    echo "$file_result"
+}
+
+gui_folder_chooser() {
+    local title="$1"
+    local start_dir="${2:-$REAL_HOME}"
+    local folder_result=""
+
+    if command -v kdialog &>/dev/null; then
+        folder_result=$(kdialog --title "$title" --getexistingdirectory "$start_dir" 2>/dev/null)
+    elif command -v zenity &>/dev/null; then
+        folder_result=$(zenity --file-selection --directory --title="$title" --filename="$start_dir/" 2>/dev/null)
+    else
+        echo -e "\n=== $title ==="
+        echo -e "Starting directory: $start_dir"
+        read -e -p "Enter full absolute path to folder: " folder_result
+    fi
+
+    echo "$folder_result"
+}
+
+gui_confirm() {
+    local title="$1"
+    local prompt="$2"
+
+    if command -v kdialog &>/dev/null; then
+        kdialog --title "$title" --warningyesno "$prompt" 2>/dev/null
+        return $?
+    elif command -v zenity &>/dev/null; then
+        zenity --question --title="$title" --text="$prompt" 2>/dev/null
+        return $?
+    else
+        echo -e "\n=== $title ==="
+        read -p "$prompt (y/N): " choice
+        case "$choice" in
+            [yY][eE][sS]|[yY]) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+}
+
+# --------------------------
+# CONFIG DETAILS / MONITORING MODULE
+# --------------------------
+
+display_config_details() {
+    notify "Gathering System & Audio Configuration Details..."
+
+    echo -e "\n${YLW}=== SYSTEM & KERNEL ENVIRONMENT ===${NC}"
+    echo -e "${GRN}Active User:${NC} $REAL_USER (UID: $USER_UID)"
+    echo -e "${GRN}Home Directory:${NC} $REAL_HOME"
+
+    if [[ -f /etc/os-release ]]; then
+        local os_name
+        os_name=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
+        echo -e "${GRN}OS Variant:${NC} $os_name"
+    fi
+    echo -e "${GRN}Kernel:${NC} $(uname -r)"
+
+    # Preemption state
+    local preempt_mode="Unknown"
+    if [[ -f /sys/kernel/debug/sched/preempt ]]; then
+        preempt_mode=$(cat /sys/kernel/debug/sched/preempt)
+    fi
+    echo -e "${GRN}Kernel Preemption Mode:${NC} $preempt_mode"
+
+    # Limits & Group memberships
+    echo -e "${GRN}User Groups:${NC} $(id -Gn "$REAL_USER")"
+    echo -e "${GRN}RT Priority Limit (ulimit -r):${NC} $(ulimit -r)"
+    echo -e "${GRN}Memlock Limit (ulimit -l):${NC} $(ulimit -l)"
+
+    # CPU Frequencies & Governor
+    echo -e "\n${YLW}=== CPU FREQUENCY ===${NC}"
+    local cpu_gov="Unknown"
+    if [[ -f "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" ]]; then
+        cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    fi
+    echo -e "${GRN}CPU Governor:${NC} $cpu_gov"
+
+    # PipeWire State
+    echo -e "\n${YLW}=== PIPEWIRE CONFIGURATION ===${NC}"
+    if command -v pw-metadata &>/dev/null; then
+        local force_q force_r
+        force_q=$(pw-metadata -n settings 0 clock.force-quantum 2>/dev/null | grep -oP 'value:\x27?\K[0-9]+' || echo "Default/Unforced")
+        force_r=$(pw-metadata -n settings 0 clock.force-rate 2>/dev/null | grep -oP 'value:\x27?\K[0-9]+' || echo "Default/Unforced")
+        echo -e "${GRN}Forced Quantum (Buffer):${NC} $force_q"
+        echo -e "${GRN}Forced Sample Rate:${NC} $force_r Hz"
+    else
+        echo -e "${RED}pw-metadata utility not found.${NC}"
+    fi
+
+    # Audio & System Daemons Table
+    echo -e "\n${YLW}=== AUDIO & SYSTEM DAEMONS ===${NC}"
+    echo -e "------------------------------------------------------------"
+    printf "  %-10s | %-10s | %-30s\n" "PID" "RT PRIO" "COMMAND"
+    echo -e "------------------------------------------------------------"
+
+    ps -eo pid,rtprio,comm | grep -iE "^ *[0-9]+ +([0-9]+|-) +(pipewire|wireplumber|pipewire-pulse|rtkit-daemon)" | sort -k2 -nr | while read -r pid rtprio comm; do
+        if [[ "$rtprio" != "-" ]]; then
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "$rtprio" "$comm"
+        else
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "0 (TS)" "$comm"
+        fi
+    done
+
+    # Threaded IRQs Table
+    echo -e "\n${YLW}=== THREADED IRQs (Hardware Interrupts) ===${NC}"
+    echo -e "------------------------------------------------------------"
+    printf "  %-10s | %-10s | %-30s\n" "PID" "RT PRIO" "COMMAND"
+    echo -e "------------------------------------------------------------"
+
+    ps -eo pid,rtprio,comm | grep -iE "^ *[0-9]+ +([0-9]+|-) +(irq/|xhci|nvme|snd)" | sort -k2 -nr | head -n 35 | while read -r pid rtprio comm; do
+        if [[ "$rtprio" != "-" ]]; then
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "$rtprio" "$comm"
+        else
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "0 (TS)" "$comm"
+        fi
+    done
+
+    # Yabridgectl Status Section
+    echo -e "\n${YLW}=== YABRIDGE CONFIGURATION STATUS ===${NC}"
+    if command -v yabridgectl &>/dev/null; then
+        yabridgectl status 2>&1
+    else
+        echo -e "${RED}yabridgectl utility not found in PATH.${NC}"
+    fi
+    echo -e "------------------------------------------------------------\n"
+}
+
+# --------------------------
+# HARDWARE & REALTIME PRIORITIES MODULES
+# --------------------------
+
+manage_pipewire() {
+    local sw_pids
+    sw_pids=$(pgrep -u "$REAL_USER" -x "pipewire|wireplumber|pipewire-pulse")
+
+    if [[ "$1" == "on" ]]; then
+        if [[ -n "$sw_pids" ]]; then
+            for pid in $sw_pids; do
+                chrt -f -p "$RT_PRIO_PIPEWIRE" "$pid" 2>/dev/null
+            done
+            confirm "Audio Stack -> Software RT Priority $RT_PRIO_PIPEWIRE Applied"
+        fi
+    else
+        if [[ -n "$sw_pids" ]]; then
+            for pid in $sw_pids; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "Audio Stack -> Default Priority Restored"
+        fi
+    fi
+}
+
+manage_soundcards() {
+    local sound_irqs
+    sound_irqs=$(pgrep -f "irq/.*(snd_hda_intel|snd_acp|snd_usb_audio)")
+
+    if [[ "$1" == "on" ]]; then
+        if [[ -n "$sound_irqs" ]]; then
+            for pid in $sound_irqs; do
+                if [[ -n "$RT_PRIO_SOUND" && "$RT_PRIO_SOUND" -gt 0 ]]; then
+                    chrt -f -p "$RT_PRIO_SOUND" "$pid" 2>/dev/null
+                else
+                    chrt -o -p 0 "$pid" 2>/dev/null
+                fi
+            done
+            confirm "Onboard Sound -> RT Priority $RT_PRIO_SOUND Applied"
+        fi
+    else
+        if [[ -n "$sound_irqs" ]]; then
+            for pid in $sound_irqs; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "Onboard Sound -> Default Priority Restored"
+        fi
+    fi
+}
+
+manage_usb() {
+    local pids
+    pids=$(pgrep -f "xhci")
+    if [[ -f "/sys/module/usbcore/parameters/autosuspend" ]]; then
+        if [[ "$1" == "on" ]]; then
+            echo -1 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+            for pid in $pids; do
+                if [[ "$RT_PRIO_USB" -gt 0 ]]; then
+                    chrt -f -p "$RT_PRIO_USB" "$pid" 2>/dev/null
+                else
+                    chrt -o -p 0 "$pid" 2>/dev/null
+                fi
+            done
+            confirm "USB -> RT Priority $RT_PRIO_USB & Autosuspend Disabled"
+        else
+            echo 2 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+            for pid in $pids; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "USB -> Default states restored"
+        fi
+    else
+        warn "USB autosuspend configuration path not found."
+    fi
+}
+
+manage_rt_all() {
+    local state="$1"
+    manage_pipewire "$state"
+    manage_soundcards "$state"
+    manage_usb "$state"
+}
+
+# --------------------------
+# SYSTEM SETUP & UNINSTALL MODULES
+# --------------------------
+
+setup_bazzite_system() {
+    if ! is_immutable; then
+        log_msg "Regular distribution detected. Skipping atomic system preparation."
+        return 0
+    fi
+
+    log_msg "Configuring Bazzite audio, render, and real-time scheduling groups..."
+    sudo groupadd -f realtime
+    sudo usermod -aG realtime,audio,render,pipewire "$REAL_USER"
+
+    log_msg "Copying real-time resource limits (@realtime & @audio)..."
+    local limits_dir="/etc/security/limits.d"
+    local limits_source="$REAL_HOME/.local/bin/bazzite-audio-manager/root/etc/security/limits.d/99-realtime.conf"
+    local limits_target="$limits_dir/99-realtime.conf"
+
+    sudo mkdir -p "$limits_dir"
+    if [[ -f "$limits_source" ]]; then
+        sudo cp "$limits_source" "$limits_target"
+        confirm "Copied $limits_source to $limits_target"
+    else
+        warn "Source configuration file not found at $limits_source"
+    fi
+
+    log_msg "Checking low-latency kernel arguments (cmdline)..."
+    local current_kargs
+    current_kargs=$(rpm-ostree kargs 2>/dev/null || echo "")
+
+    local append_args=()
+    if [[ ! "$current_kargs" =~ "preempt=full" ]]; then
+        append_args+=("--append=preempt=full")
+    fi
+    if [[ ! "$current_kargs" =~ "threadirqs" ]]; then
+        append_args+=("--append=threadirqs")
+    fi
+
+    if [ ${#append_args[@]} -gt 0 ]; then
+        log_msg "Applying kernel arguments: ${append_args[*]}"
+        sudo rpm-ostree kargs "${append_args[@]}"
+        log_msg "System modifications complete! A REBOOT is required to apply kernel and group changes."
+    else
+        log_msg "Kernel arguments are already applied. A REBOOT/LOGOUT is recommended if groups were added."
+    fi
+}
+
+uninstall_bazzite_system() {
+    if ! is_immutable; then
+        log_msg "Regular distribution detected. Skipping atomic system uninstallation."
+        return 0
+    fi
+
+    log_msg "Reverting Bazzite real-time & audio configuration..."
+
+    # 1. Remove limits file
+    local limits_target="/etc/security/limits.d/99-realtime.conf"
+    if [[ -f "$limits_target" ]]; then
+        sudo rm -f "$limits_target"
+        confirm "Removed $limits_target"
+    else
+        log_msg "No limits file found at $limits_target"
+    fi
+
+    # 2. Remove user from realtime group if present
+    if getent group realtime >/dev/null; then
+        log_msg "Removing user $REAL_USER from group 'realtime'..."
+        sudo gpasswd -d "$REAL_USER" realtime 2>/dev/null || true
+    fi
+
+    # 3. Revert kernel arguments (preempt=full and threadirqs)
+    log_msg "Checking low-latency kernel arguments (cmdline)..."
+    local current_kargs
+    current_kargs=$(rpm-ostree kargs 2>/dev/null || echo "")
+
+    local delete_args=()
+    if [[ "$current_kargs" =~ "preempt=full" ]]; then
+        delete_args+=("--delete=preempt=full")
+    fi
+    if [[ "$current_kargs" =~ "threadirqs" ]]; then
+        delete_args+=("--delete=threadirqs")
+    fi
+
+    if [ ${#delete_args[@]} -gt 0 ]; then
+        log_msg "Removing kernel arguments: ${delete_args[*]}"
+        sudo rpm-ostree kargs "${delete_args[@]}"
+        log_msg "System uninstallation complete! A REBOOT is required to restore default kernel parameters and group permissions."
+    else
+        log_msg "No custom kernel arguments to remove. A REBOOT/LOGOUT is recommended if group memberships were modified."
+    fi
+}
+
+# --------------------------
+# PIPEWIRE SESSION MODULE
+# --------------------------
+
+pipewire_session_set() {
+    local quantum="$1"
+    local samplerate="$2"
+
+    if [ -n "$quantum" ]; then
+        pw-metadata -n settings 0 clock.force-quantum "$quantum"
+        confirm "Pipewire quantum forced to $quantum"
+    fi
+
+    if [ -n "$samplerate" ]; then
+        pw-metadata -n settings 0 clock.force-rate "$samplerate"
+        confirm "Pipewire samplerate forced to $samplerate Hz"
+    fi
+}
+
+# --------------------------
+# APPLICATION LAUNCH MODULES
+# --------------------------
+
+launch_app_pw_latency() {
+    local binary_path="$1"
+    local quantum="${2:-128}"
+    local samplerate="${3:-48000}"
+
+    if [[ -z "$binary_path" ]]; then
+        warn "No executable binary specified."
+        return 1
+    fi
+
+    if [[ "$binary_path" != /* ]]; then
+        warn "Invalid path: Absolute UNIX/POSIX path starting with '/' is required."
+        return 1
+    fi
+
+    if [[ ! -f "$binary_path" ]]; then
+        warn "Binary not found at path: $binary_path"
+        return 1
+    fi
+
+    if [[ ! -x "$binary_path" ]]; then
+        warn "File is not executable: $binary_path"
+        return 1
+    fi
+
+    notify "Launching application with PIPEWIRE_LATENCY=${quantum}/${samplerate} via pw-jack..."
+    notify "Target: $binary_path"
+
+    PIPEWIRE_LATENCY="${quantum}/${samplerate}" pw-jack "$binary_path"
+}
+
+set_pipeasio_env() {
+    local appimg1="$REAL_HOME/AppImages/pipeasio_manager.appimage"
+    local appimg2="$REAL_HOME/Applications/pipeasio_manager.appimage"
+
+    if [[ -f "$appimg1" ]]; then
+        export PIPEASIO_MANAGER_PATH="$appimg1"
+    elif [[ -f "$appimg2" ]]; then
+        export PIPEASIO_MANAGER_PATH="$appimg2"
+    else
+        export PIPEASIO_MANAGER_PATH=""
+    fi
+}
+
+launch_pipeasio_manager() {
+    set_pipeasio_env
+
+    if [[ -z "$PIPEASIO_MANAGER_PATH" || ! -f "$PIPEASIO_MANAGER_PATH" ]]; then
+        warn "PipeASIO Manager AppImage not found in $REAL_HOME/AppImages/ or $REAL_HOME/Applications/"
+        return 1
+    fi
+
+    chmod +x "$PIPEASIO_MANAGER_PATH" 2>/dev/null
+    notify "Launching PipeASIO Manager using \$PIPEASIO_MANAGER_PATH..."
+    notify "Resolved location: $PIPEASIO_MANAGER_PATH"
+
+    "$PIPEASIO_MANAGER_PATH"
+}
+
+launch_pipeasio_app() {
+    local launch_script="$1"
+    local exe_path="$2"
+
+    if [[ -z "$launch_script" || -z "$exe_path" ]]; then
+        warn "Both prefix launch script and executable path must be supplied."
+        return 1
+    fi
+
+    if [[ "$launch_script" != /* || "$exe_path" != /* ]]; then
+        warn "Invalid paths: Absolute UNIX/POSIX paths starting with '/' are required."
+        return 1
+    fi
+
+    if [[ ! -f "$launch_script" ]]; then
+        warn "Launch script not found: $launch_script"
+        return 1
+    fi
+
+    if [[ $(basename "$launch_script") != "launch" ]]; then
+        warn "Invalid script selection: Target file name must strictly be 'launch'"
+        return 1
+    fi
+
+    if [[ ! -f "$exe_path" ]]; then
+        warn "Executable file not found: $exe_path"
+        return 1
+    fi
+
+    case "$exe_path" in
+        *.exe|*.EXE|*.bat|*.BAT) ;;
+        *)
+            warn "Invalid executable extension. Must end in .exe, .EXE, .bat, or .BAT"
+            return 1
+            ;;
+    esac
+
+    chmod +x "$launch_script" 2>/dev/null
+    notify "Executing PipeASIO Launch Script: $launch_script"
+    notify "Target Windows Application: $exe_path"
+
+    "$launch_script" "$exe_path"
+}
+
+# --------------------------
+# YABRIDGE MODULE
+# --------------------------
+
+yabridge_add_path() {
+    local dir_path="$1"
+
+    if [[ -z "$dir_path" ]]; then
+        warn "No directory specified to add to yabridgectl."
+        return 1
+    fi
+
+    if [[ ! -d "$dir_path" ]]; then
+        warn "Directory does not exist: $dir_path"
+        return 1
+    fi
+
+    if ! command -v yabridgectl &>/dev/null; then
+        warn "yabridgectl executable not found in PATH."
+        return 1
+    fi
+
+    notify "Adding path to yabridgectl: $dir_path"
+    yabridgectl add "$dir_path"
+}
+
+yabridge_get_paths() {
+    local config_file="$REAL_HOME/.config/yabridgectl/config.toml"
+    if [[ ! -f "$config_file" ]]; then
+        return 1
+    fi
+
+    # Parse out strings inside plugin_dirs array from config.toml
+    sed -n '/plugin_dirs = \[/,/\]/p' "$config_file" | grep -E "^\s*['\"]" | sed -E "s/^\s*['\"]([^'\"]+)['\"],?/\1/"
+}
+
+yabridge_remove_path() {
+    local dir_path="$1"
+
+    if [[ -z "$dir_path" ]]; then
+        warn "No directory specified to remove from yabridgectl."
+        return 1
+    fi
+
+    if ! command -v yabridgectl &>/dev/null; then
+        warn "yabridgectl executable not found in PATH."
+        return 1
+    fi
+
+    notify "Removing path from yabridgectl: $dir_path"
+    yabridgectl rm "$dir_path"
+}
+
+yabridge_sync() {
+    if ! command -v yabridgectl &>/dev/null; then
+        warn "yabridgectl executable not found in PATH."
+        return 1
+    fi
+
+    notify "Synchronizing yabridge plugin bridges..."
+    yabridgectl sync
+}
+
+# --------------------------
+# OPTION FLAGS ROUTING
+# --------------------------
+
+RUN_GUI=true
+DO_SETUP=false
+DO_UNINSTALL=false
+RT_VAL=""
+QUANTUM_VAL=""
+RATE_VAL=""
+LAUNCH_BIN=""
+DO_PIPEASIO_MGR=false
+PIPEASIO_SCRIPT=""
+PIPEASIO_EXE=""
+YABRIDGE_ADD_DIR=""
+YABRIDGE_RM_DIR=""
+DO_YABRIDGE_SYNC=false
+DO_CONFIG_DETAILS=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--setup|--install)
+            DO_SETUP=true
+            RUN_GUI=false
+            shift
+            ;;
+        -u|--uninstall)
+            DO_UNINSTALL=true
+            RUN_GUI=false
+            shift
+            ;;
+        -r|--rt)
+            RT_VAL="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        -q|--quantum)
+            QUANTUM_VAL="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        -a|--rate)
+            RATE_VAL="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        -l|--launch)
+            LAUNCH_BIN="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        -p|--pipeasio-mgr)
+            DO_PIPEASIO_MGR=true
+            RUN_GUI=false
+            shift
+            ;;
+        --pipeasio-app)
+            PIPEASIO_SCRIPT="$2"
+            PIPEASIO_EXE="$3"
+            RUN_GUI=false
+            shift 3
+            ;;
+        --yabridge-add)
+            YABRIDGE_ADD_DIR="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        --yabridge-rm)
+            YABRIDGE_RM_DIR="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        --yabridge-sync)
+            DO_YABRIDGE_SYNC=true
+            RUN_GUI=false
+            shift
+            ;;
+        -m|--config-details|--status|--monitor)
+            DO_CONFIG_DETAILS=true
+            RUN_GUI=false
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$RUN_GUI" = false ]; then
+    if [ "$DO_SETUP" = true ]; then
+        setup_bazzite_system
+    fi
+    if [ "$DO_UNINSTALL" = true ]; then
+        uninstall_bazzite_system
+    fi
+    if [ -n "$RT_VAL" ]; then
+        manage_rt_all "$RT_VAL"
+    fi
+    if [ -n "$LAUNCH_BIN" ]; then
+        launch_app_pw_latency "$LAUNCH_BIN" "${QUANTUM_VAL:-128}" "${RATE_VAL:-48000}"
+    elif [ -n "$QUANTUM_VAL" ] || [ -n "$RATE_VAL" ]; then
+        pipewire_session_set "$QUANTUM_VAL" "$RATE_VAL"
+    fi
+    if [ "$DO_PIPEASIO_MGR" = true ]; then
+        launch_pipeasio_manager
+    fi
+    if [ -n "$PIPEASIO_SCRIPT" ] && [ -n "$PIPEASIO_EXE" ]; then
+        launch_pipeasio_app "$PIPEASIO_SCRIPT" "$PIPEASIO_EXE"
+    fi
+    if [ -n "$YABRIDGE_ADD_DIR" ]; then
+        yabridge_add_path "$YABRIDGE_ADD_DIR"
+    fi
+    if [ -n "$YABRIDGE_RM_DIR" ]; then
+        yabridge_remove_path "$YABRIDGE_RM_DIR"
+    fi
+    if [ "$DO_YABRIDGE_SYNC" = true ]; then
+        yabridge_sync
+    fi
+    if [ "$DO_CONFIG_DETAILS" = true ]; then
+        display_config_details
+    fi
+    exit 0
+fi
+
+# --------------------------
+# MAIN INTERACTIVE GUI LOOP
+# --------------------------
+
+while true; do
+    CHOICE=$(gui_menu "Bazzite Audio Session Manager" "Choose an action from the menu below:" \
+        "setup"          "Initial Setup Options" \
+        "rt"             "Set RT Priorities" \
+        "pipewire"       "Pipewire Session Settings" \
+        "launch_app"     "Launch Application (with PipeWire Latency)" \
+        "pipeasio"       "PipeASIO Launch" \
+        "yabridge"       "Yabridge Settings" \
+        "config_details" "Config Details" \
+        "exit"           "Exit")
+
+    case "$CHOICE" in
+        setup)
+            SETUP_CHOICE=$(gui_menu "Initial Setup Options" "Select setup action:" \
+                "install"   "Install System Configuration" \
+                "uninstall" "Uninstall System Configuration")
+
+            case "$SETUP_CHOICE" in
+                install)
+                    launch_in_terminal "sudo '$SCRIPT_PATH' --install" "Install System Setup"
+                    ;;
+                uninstall)
+                    if gui_confirm "Confirm Uninstallation" "Are you sure you want to remove real-time limits and kernel tweaks?"; then
+                        launch_in_terminal "sudo '$SCRIPT_PATH' --uninstall" "Uninstall System Setup"
+                    fi
+                    ;;
+            esac
+            ;;
+
+        rt)
+            RT_CHOICE=$(gui_menu "Set RT Priorities" "Configure real-time scheduling priorities:" \
+                "rt_on"  "Realtime scheduling" \
+                "rt_off" "Default scheduling")
+
+            case "$RT_CHOICE" in
+                rt_on)  launch_in_terminal "sudo '$SCRIPT_PATH' --rt on" "Enable Realtime Scheduling" ;;
+                rt_off) launch_in_terminal "sudo '$SCRIPT_PATH' --rt off" "Restore Default Scheduling" ;;
+            esac
+            ;;
+
+        pipewire)
+            QUANTUM_CHOICE=$(gui_menu "Pipewire Quantum Buffer" "Select buffer latency level:" \
+                "64"   "Ultra Low-Latency (64 quantum buffer)" \
+                "128"  "Low-Latency (128 quantum buffer)" \
+                "256"  "Balanced (256 quantum buffer)" \
+                "512"  "Post-Processing (512 quantum buffer)" \
+                "1024" "Desktop (default 1024 quantum buffer)")
+
+            if [ -z "$QUANTUM_CHOICE" ]; then continue; fi
+
+            RATE_CHOICE=$(gui_menu "Pipewire Sample Rate" "Select session target sample rate:" \
+                "44100" "44100 Hz" \
+                "48000" "48000 Hz" \
+                "88200" "88200 Hz" \
+                "96000" "96000 Hz")
+
+            if [ -z "$RATE_CHOICE" ]; then continue; fi
+
+            launch_in_terminal "'$SCRIPT_PATH' --quantum $QUANTUM_CHOICE --rate $RATE_CHOICE" "Set Pipewire Rate & Quantum"
+            ;;
+
+        launch_app)
+            QUANTUM_CHOICE=$(gui_menu "Launch App - Select Quantum Buffer" "Select buffer latency level:" \
+                "64"   "Ultra Low-Latency (64 quantum buffer)" \
+                "128"  "Low-Latency (128 quantum buffer)" \
+                "256"  "Balanced (256 quantum buffer)" \
+                "512"  "Post-Processing (512 quantum buffer)" \
+                "1024" "Desktop (default 1024 quantum buffer)")
+
+            if [ -z "$QUANTUM_CHOICE" ]; then continue; fi
+
+            RATE_CHOICE=$(gui_menu "Launch App - Select Sample Rate" "Select target sample rate:" \
+                "44100" "44100 Hz" \
+                "48000" "48000 Hz" \
+                "88200" "88200 Hz" \
+                "96000" "96000 Hz")
+
+            if [ -z "$RATE_CHOICE" ]; then continue; fi
+
+            SELECTED_BIN=$(gui_file_chooser "Select Executable Binary to Launch" "" "$REAL_HOME")
+
+            if [ -n "$SELECTED_BIN" ]; then
+                launch_in_terminal "'$SCRIPT_PATH' --launch '$SELECTED_BIN' --quantum $QUANTUM_CHOICE --rate $RATE_CHOICE" "Launch Application with PipeWire Latency"
+            fi
+            ;;
+
+        pipeasio)
+            PIPEASIO_CHOICE=$(gui_menu "PipeASIO Launch Options" "Select PipeASIO action:" \
+                "mgr" "Launch PipeASIO manager" \
+                "app" "Launch App with PipeASIO")
+
+            case "$PIPEASIO_CHOICE" in
+                mgr)
+                    launch_in_terminal "'$SCRIPT_PATH' --pipeasio-mgr" "Launch PipeASIO Manager"
+                    ;;
+                app)
+                    PREFIX_DIR="$REAL_HOME/.local/share/pipeasio/prefixes"
+                    mkdir -p "$PREFIX_DIR"
+
+                    SELECTED_SCRIPT=$(gui_file_chooser "Select PipeASIO Prefix Launch Script" "launch" "$PREFIX_DIR")
+                    if [ -z "$SELECTED_SCRIPT" ]; then continue; fi
+
+                    SELECTED_EXE=$(gui_file_chooser "Select Windows Executable (.exe, .bat)" "*.exe *.EXE *.bat *.BAT" "$REAL_HOME")
+                    if [ -z "$SELECTED_EXE" ]; then continue; fi
+
+                    launch_in_terminal "'$SCRIPT_PATH' --pipeasio-app '$SELECTED_SCRIPT' '$SELECTED_EXE'" "Launch App with PipeASIO"
+                    ;;
+            esac
+            ;;
+
+        yabridge)
+            YABRIDGE_CHOICE=$(gui_menu "Yabridge Settings" "Select Yabridge action:" \
+                "add"  "Add Path" \
+                "rm"   "Remove Path" \
+                "sync" "Sync Plugins")
+
+            case "$YABRIDGE_CHOICE" in
+                add)
+                    SELECTED_FOLDER=$(gui_folder_chooser "Select VST/Plugin Directory to Add" "$REAL_HOME/.wine/drive_c")
+                    if [ -n "$SELECTED_FOLDER" ]; then
+                        launch_in_terminal "'$SCRIPT_PATH' --yabridge-add '$SELECTED_FOLDER'" "Yabridge Add Path"
+                    fi
+                    ;;
+                rm)
+                    mapfile -t PATH_LIST < <(yabridge_get_paths)
+
+                    if [ ${#PATH_LIST[@]} -eq 0 ]; then
+                        warn "No plugin paths found in yabridgectl config.toml."
+                        continue
+                    fi
+
+                    MENU_ARGS=()
+                    for idx in "${!PATH_LIST[@]}"; do
+                        MENU_ARGS+=("$idx" "${PATH_LIST[$idx]}")
+                    done
+
+                    SELECTED_INDEX=$(gui_menu "Remove Yabridge Path" "Select path to remove:" "${MENU_ARGS[@]}")
+
+                    if [ -n "$SELECTED_INDEX" ]; then
+                        TARGET_PATH="${PATH_LIST[$SELECTED_INDEX]}"
+                        if gui_confirm "Confirm Removal" "Are you sure you want to remove this path from yabridge?\n\n$TARGET_PATH"; then
+                            launch_in_terminal "'$SCRIPT_PATH' --yabridge-rm '$TARGET_PATH'" "Yabridge Remove Path"
+                        fi
+                    fi
+                    ;;
+                sync)
+                    launch_in_terminal "'$SCRIPT_PATH' --yabridge-sync" "Sync Yabridge Plugins"
+                    ;;
+            esac
+            ;;
+
+        config_details)
+            launch_in_terminal "'$SCRIPT_PATH' --config-details" "Config Details"
+            ;;
+
+        exit|"")
+            break
+            ;;
+    esac
+done
+
+exit 0

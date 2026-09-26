@@ -1,0 +1,2 @@
+# Clean REAPER environment overrides using $HOME
+export PATH="$HOME/.local/bin/reaper:$PATH"

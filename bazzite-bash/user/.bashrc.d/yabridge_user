@@ -1,0 +1,2 @@
+# Clean yabridge environment overrides using $HOME
+export PATH="$HOME/.local/bin/yabridge:$PATH"

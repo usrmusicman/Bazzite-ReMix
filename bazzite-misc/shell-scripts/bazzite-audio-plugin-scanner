@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# 1. Create local source directories
+mkdir -p bin clap lv2 vst vst3
+
+# 2. Ensure system target directories exist in $HOME
+mkdir -p "$HOME/.clap" "$HOME/.lv2" "$HOME/.vst" "$HOME/.vst3"
+
+# Helper function to validate extensions and symlink files or directories
+link_plugins() {
+    local src_dir="$1"
+    local dest_dir="$2"
+    shift 2
+    local valid_exts=("$@")
+
+    shopt -s nullglob
+    local items=("$src_dir"/*)
+    shopt -u nullglob
+
+    if [ ${#items[@]} -eq 0 ]; then
+        echo "No items found in ./$src_dir/"
+        return
+    fi
+
+    for item in "${items[@]}"; do
+        if [ -e "$item" ]; then
+            local filename
+            filename=$(basename "$item")
+
+            # Check if item matches any allowed extension
+            local is_valid=false
+            for ext in "${valid_exts[@]}"; do
+                if [[ "$filename" == *"$ext" ]]; then
+                    is_valid=true
+                    break
+                fi
+            done
+
+            if [ "$is_valid" = true ]; then
+                local abs_path
+                abs_path=$(realpath "$item")
+                echo "Linking [$filename] -> $dest_dir/"
+                ln -sfn "$abs_path" "$dest_dir/$filename"
+            else
+                echo "Skipping invalid item in ./$src_dir/: $filename"
+            fi
+        fi
+    done
+}
+
+echo "=== Syncing Audio Plugins ==="
+
+echo "[CLAP]"
+link_plugins "clap" "$HOME/.clap" ".clap"
+
+echo "[LV2]"
+link_plugins "lv2" "$HOME/.lv2" ".lv2"
+
+echo "[VST2]"
+link_plugins "vst" "$HOME/.vst" ".so" ".vst"
+
+echo "[VST3]"
+link_plugins "vst3" "$HOME/.vst3" ".vst3"
+
+echo "=== Executing Shell Scripts in ./bin (Root Level Only) ==="
+shopt -s nullglob
+scripts=(bin/*)
+shopt -u nullglob
+
+if [ ${#scripts[@]} -gt 0 ]; then
+    for script in "${scripts[@]}"; do
+        # Verify item is a regular file at root level
+        if [ -f "$script" ]; then
+            # Verify executable permission before running
+            if [ -x "$script" ]; then
+                echo "Executing: $script"
+                "$script"
+            else
+                echo "Skipping non-executable script: $script"
+            fi
+        fi
+    done
+else
+    echo "No scripts found in ./bin/"
+fi
+
+echo "=== Complete ==="

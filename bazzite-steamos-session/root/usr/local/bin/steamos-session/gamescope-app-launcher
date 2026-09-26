@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# UNIFIED STEAMOS SESSION SCRIPT (2026 HIGH-PERFORMANCE EDITION)
+# ==============================================================================
+# This script manages GPU-specific environment variables, compositor settings,
+# and session launching. It uses a modular architecture to share core logic
+# between driver variations (e.g., NVIDIA Proprietary vs. NVIDIA Hybrid).
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. INITIALIZATION & ARGUMENT PARSING
+# ------------------------------------------------------------------------------
+
+# Path for SteamOS specific session configurations for Deck users
+STEAMOS_SESSION_CONFIG="$HOME/.config/steamos-session/steamos-session-config"
+
+# Load session config if available; otherwise, the script uses the hardcoded defaults below
+if [[ -f "$STEAMOS_SESSION_CONFIG" ]]; then
+    source "$STEAMOS_SESSION_CONFIG"
+else
+    echo -e "${YLW}WARNING: Session config not found, using built-in defaults${NC}"
+fi
+
+# ------------------------------------------------------------------------------
+# 3. GAMESCOPE COMPOSITOR SETUP
+# ------------------------------------------------------------------------------
+
+# Fallback defaults (prevents Gamescope crash if configs are missing or paths are broken)
+: "${RENDER_WIDTH:=1280}"
+: "${RENDER_HEIGHT:=720}"
+: "${SCREENWIDTH:=1280}"
+: "${SCREENHEIGHT:=720}"
+: "${REFRESHRATE:=60}"
+: "${ENABLE_HDR:-0}"
+: "${HDR_SDR:=300}"
+: "${HDR_TONEMAP:=100}"
+: "${HDR_MAX:=800}"
+
+# Using an array to handle arguments cleanly without quoting issues.
+GS_ARGS=(
+  "-w" "$RENDER_WIDTH"      # Virtual width game sees
+  "-h" "$RENDER_HEIGHT"     # Virtual height game sees
+  "-W" "$SCREENWIDTH"       # Actual physical width
+  "-H" "$SCREENHEIGHT"      # Actual physical height
+  "-r" "$REFRESHRATE"       # Monitor Hz
+  "-f"                      # Fullscreen
+  "--adaptive-sync"         # VRR/G-Sync/FreeSync
+  "--immediate-flips"       # Lowest possible latency (Tearing allowed if out of VRR)
+  "--force-grab-cursor"     # Prevent mouse escaping the game window
+)
+
+# HDR Settings
+HDR_ARGS=(
+  "--hdr-enabled"                   # Enable HDR Support
+  "--hdr-sdr-content-nits=$HDR_SDR" # Max brightness (nits) for SDR Content on HDR
+  "--hdr-itm-sdr-nits=$HDR_TONEMAP" # HDR inverse tonemap, minimum whitepoint (nits) value
+  "--hdr-itm-target-nits=$HDR_MAX"  # Max brightness (nits) for HDR content.
+)
+
+# Steam still requires XWayland for many web-views and older games,
+# so we keep it for Steam.
+
+if [[ ! -z "$ENABLE_HDR" ]]; then
+  if [[ "$ENABLE_HDR" == "0" ]]; then
+    gamescope "${GS_ARGS[@]}" "$@"
+  elif [[ "$ENABLE_HDR" == "1" ]]; then
+    gamescope "${GS_ARGS[@]}" "${HDR_ARGS[@]}" "$@"
+  else
+    echo "Arguments not valid please ensure all inputs are correct"
+  fi
+else
+  echo "Unrecognized value, please type a 0 or 1 for the variable ENABLE_HDR in the steamos-session-config"
+fi
