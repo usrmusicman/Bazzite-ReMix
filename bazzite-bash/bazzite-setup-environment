@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/user"
 DEST_DIR="${HOME}"
 
-# Define and create the folders directly in the destination directory (~/.local/bin/)
 DEST_BIN_DIR="${DEST_DIR}/.local/bin"
 FOLDERS=("steamos-session" "wine" "yabridge")
 
@@ -15,7 +13,6 @@ for folder in "${FOLDERS[@]}"; do
     mkdir -p "${DEST_BIN_DIR}/${folder}"
 done
 
-# Verify the source directory exists
 if [[ ! -d "${SRC_DIR}" ]]; then
     echo "Error: Source directory '${SRC_DIR}' does not exist." >&2
     exit 1
@@ -23,12 +20,14 @@ fi
 
 echo "Copying files from '${SRC_DIR}' to '${DEST_DIR}'..."
 
-# Use rsync if available for progress tracking, otherwise fall back to cp -a
 if command -v rsync &>/dev/null; then
     rsync -av "${SRC_DIR}/" "${DEST_DIR}/"
 else
-    # The '/.' syntax ensures all hidden files (dotfiles) and folders are copied
     cp -a "${SRC_DIR}/." "${DEST_DIR}/"
 fi
+
+# Enforce executable permissions on binary directories after sync
+echo "Enforcing executable permissions in ${DEST_BIN_DIR}..."
+find "${DEST_BIN_DIR}" -type f -exec chmod +x {} +
 
 echo "Successfully synchronized paths to ${DEST_DIR}"
