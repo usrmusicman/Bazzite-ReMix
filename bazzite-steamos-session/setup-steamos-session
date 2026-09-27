@@ -62,8 +62,7 @@ uninstall_session() {
   rm -rf /usr/local/bin/steamos-session
 
   # Remove desktop entries
-  rm -f /usr/local/share/applications/steamos3-deck-session.desktop
-  rm -f /usr/local/share/applications/steamos3-normal-session.desktop
+  rm -f /usr/local/share/applications/steamos3-gamepadui.desktop
 
   echo "==> Uninstallation complete!"
 }
