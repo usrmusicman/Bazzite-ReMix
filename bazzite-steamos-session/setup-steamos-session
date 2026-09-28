@@ -42,12 +42,6 @@ install_session() {
   install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/steamos-session-select" \
                  "/usr/local/bin/steamos-session/steamos-session-select"
 
-  # 2. Config Files in /usr/local/bin/steamos-session/config/bash (644)
-  install -Dm644 "$SOURCE_ROOT/usr/local/bin/steamos-session/config/bash/.bash_profile.gamepadui" \
-                 "/usr/local/bin/steamos-session/config/bash/.bash_profile.gamepadui"
-  install -Dm644 "$SOURCE_ROOT/usr/local/bin/steamos-session/config/bash/.bash_profile.normal" \
-                 "/usr/local/bin/steamos-session/config/bash/.bash_profile.normal"
-
   # 3. Desktop Applications (644)
   install -Dm644 "$SOURCE_ROOT/usr/local/share/applications/steamos3-gamepadui.desktop" \
                  "/usr/local/share/applications/steamos3-gamepadui.desktop"
