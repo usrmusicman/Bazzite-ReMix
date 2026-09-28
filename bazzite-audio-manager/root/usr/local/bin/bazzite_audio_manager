@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Bazzite Audio Manager
-# GUI frontend and execution suite for Bazzite / Fedora Pro Audio configuration
+# Bazzite & Linux Gamemode Audio / System Manager
+# High-Performance Audio, Real-Time Scheduling, GPU & Hardware Tuning Suite
 # ==============================================================================
 
 # --------------------------
-# USER & CONFIGURATION
+# INITIALIZATION & USER CONFIG
 # --------------------------
 
-# Identify actual logged-in user when running via sudo
+if [[ -z "$TERM" || "$TERM" == "unknown" ]]; then
+    export TERM=linux
+fi
+
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 REAL_HOME="${REAL_HOME:-/home/$REAL_USER}"
 USER_UID=$(id -u "$REAL_USER" 2>/dev/null || echo 1000)
 
-# Ensure PipeWire commands target the user session even under sudo
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USER_UID}"
 
-# Path for SteamOS / Bazzite session configs
 STEAMOS_SESSION_CONFIG="$REAL_HOME/.config/steamos-session/steamos-session-config"
 
-# Output formatting colors
 RED='\033[0;31m'
 GRN='\033[0;32m'
 YLW='\033[1;33m'
@@ -29,12 +29,12 @@ BLU='\033[0;34m'
 CYN='\033[0;36m'
 NC='\033[0m'
 
-# Default RT Priorities
+# Default Tuning Values
+GPU_SETUP=${GPU_SETUP:-generic}
 RT_PRIO_USB=${RT_PRIO_USB:-90}
 RT_PRIO_PIPEWIRE=${RT_PRIO_PIPEWIRE:-90}
 RT_PRIO_SOUND=${RT_PRIO_SOUND:-85}
 
-# Load session config if available; otherwise, the script uses the hardcoded defaults above
 if [[ -f "$STEAMOS_SESSION_CONFIG" ]]; then
     source "$STEAMOS_SESSION_CONFIG"
 else
@@ -66,16 +66,20 @@ show_help() {
     echo "Options:"
     echo "  -s, --setup, --install             Execute initial Bazzite pro-audio setup"
     echo "  -u, --uninstall                    Undo and remove initial Bazzite pro-audio setup"
-    echo "  -r, --rt <on|off>                  Enable or disable real-time priorities"
+    echo "  -sc, --sched <lavd|bpfland|off>    Manage eBPF custom CPU scheduler (SCX)"
+    echo "  -r, --rt <on|off|sound_on|sound_off|usb_on|usb_off|pw_on|pw_off>"
+    echo "                                     Enable or disable real-time scheduling priorities"
+    echo "  -t, --tuning <on|off|gpu_on|gpu_off|wifi_on|wifi_off>"
+    echo "                                     Manage system performance tuneables (GPU / WiFi)"
     echo "  -q, --quantum <buffer_size>        Force PipeWire quantum buffer size"
     echo "  -a, --rate <sample_rate>           Force PipeWire sample rate (Hz)"
     echo "  -l, --launch <binary_path>         Launch application with PIPEWIRE_LATENCY & pw-jack"
     echo "  -p, --pipeasio-mgr                 Launch PipeASIO Manager AppImage via \$PIPEASIO_MANAGER_PATH"
     echo "  --pipeasio-app <script> <exe_path> Launch Windows app using PipeASIO prefix launch script"
     echo "  --yabridge-add <dir_path>          Add plugin path to yabridgectl"
-    echo "  --yabridge-rm <dir_path>           Remove plugin path from yabridgectl"
-    echo "  --yabridge-sync                    Synchronize yabridgectl plugin bridges"
-    echo "  -m, --config-details               Display hardware, audio stack, & yabridge status"
+    echo "  --yabridge-rm <dir_path>          Remove plugin path from yabridgectl"
+    echo "  --yabridge-sync                    Synchronize yabridge plugin bridges"
+    echo "  -m, --config-details               Display hardware, audio stack, GPU, eBPF & yabridge status"
     echo "  -h, --help                         Show this help menu"
 }
 
@@ -85,7 +89,7 @@ show_help() {
 
 launch_in_terminal() {
     local cmd="$1"
-    local title="${2:-Bazzite Audio Action}"
+    local title="${2:-Bazzite System Action}"
 
     local tmp_script
     tmp_script=$(mktemp /tmp/audio_mgr_XXXXXX.sh)
@@ -94,7 +98,7 @@ launch_in_terminal() {
     cat << EOF > "$tmp_script"
 #!/usr/bin/env bash
 echo -e "${CYN}============================================================${NC}"
-echo -e "${CYN} Bazzite Audio Session Manager: $title ${NC}"
+echo -e "${CYN} Bazzite Session Manager: $title ${NC}"
 echo -e "${CYN}============================================================${NC}\n"
 $cmd
 echo ""
@@ -126,7 +130,6 @@ EOF
 
 # --------------------------
 # GUI DIALOG & CHOOSER WRAPPERS
-# Order: kdialog -> zenity -> CLI Fallback
 # --------------------------
 
 gui_menu() {
@@ -171,11 +174,7 @@ gui_file_chooser() {
     local file_result=""
 
     if command -v kdialog &>/dev/null; then
-        if [[ -n "$filter_pattern" ]]; then
-            file_result=$(kdialog --title "$title" --getopenfilename "$start_dir" "$filter_pattern" 2>/dev/null)
-        else
-            file_result=$(kdialog --title "$title" --getopenfilename "$start_dir" 2>/dev/null)
-        fi
+        file_result=$(kdialog --title "$title" --getopenfilename "$start_dir" "$filter_pattern" 2>/dev/null)
     elif command -v zenity &>/dev/null; then
         local zen_filter=()
         if [[ -n "$filter_pattern" ]]; then
@@ -230,11 +229,239 @@ gui_confirm() {
 }
 
 # --------------------------
+# SYSTEM TUNING MODULE (GPU & WiFi Tuneables)
+# --------------------------
+
+manage_wifi() {
+    local action="$1"
+    # Action 'on' disables power save mode for maximum performance / low latency
+    local p_state=$([[ "$action" == "on" ]] && echo "off" || echo "on")
+
+    if command -v iw &>/dev/null; then
+        for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
+            iw dev "$dev" set power_save "$p_state" 2>/dev/null
+        done
+        confirm "WiFi Power Save -> $p_state (Performance target: off)"
+    else
+        warn "iw utility not found. Unable to toggle WiFi power save."
+    fi
+}
+
+manage_gpu() {
+    local action="$1"
+    case "$GPU_SETUP" in
+        amd)
+            if [[ "$action" == "on" ]]; then
+                for dev in /sys/class/drm/card*/device/; do
+                    [[ -f "${dev}power_dpm_force_performance_level" ]] && echo "high" | tee "${dev}power_dpm_force_performance_level" >/dev/null 2>&1
+                done
+                confirm "GPU (AMD) -> Performance Mode (high)"
+            else
+                for dev in /sys/class/drm/card*/device/; do
+                    [[ -f "${dev}power_dpm_force_performance_level" ]] && echo "auto" | tee "${dev}power_dpm_force_performance_level" >/dev/null 2>&1
+                done
+                confirm "GPU (AMD) -> Default Auto Mode"
+            fi
+            ;;
+        intel)
+            if [[ "$action" == "on" ]]; then
+                for dev in /sys/class/drm/card*/gt/gt*/; do
+                    if [[ -f "${dev}rps_boost_freq_mhz" && -f "${dev}rps_max_freq_mhz" ]]; then
+                        cat "${dev}rps_boost_freq_mhz" > "${dev}rps_max_freq_mhz" 2>/dev/null
+                    fi
+                done
+                confirm "GPU (Intel) -> Clocks Uncapped (Boost Max)"
+            else
+                for dev in /sys/class/drm/card*/gt/gt*/; do
+                    if [[ -f "${dev}rps_RP0_freq_mhz" && -f "${dev}rps_max_freq_mhz" ]]; then
+                        cat "${dev}rps_RP0_freq_mhz" > "${dev}rps_max_freq_mhz" 2>/dev/null
+                    fi
+                done
+                confirm "GPU (Intel) -> Default Clock Limits Restored"
+            fi
+            ;;
+        nvidia)
+            if [[ "$action" == "on" ]]; then
+                nvidia-smi -pm 1 >/dev/null 2>&1
+                runuser -u "$REAL_USER" -- nvidia-settings -a "[gpu:0]/GPUPowerMizerMode=1" >/dev/null 2>&1
+                runuser -u "$REAL_USER" -- nvidia-settings -a "[gpu:1]/GPUPowerMizerMode=1" >/dev/null 2>&1
+                confirm "GPU (NVIDIA) -> Prefer Maximum Performance"
+            else
+                nvidia-smi -pm 0 >/dev/null 2>&1
+                runuser -u "$REAL_USER" -- nvidia-settings -a "[gpu:0]/GPUPowerMizerMode=0" >/dev/null 2>&1
+                runuser -u "$REAL_USER" -- nvidia-settings -a "[gpu:1]/GPUPowerMizerMode=0" >/dev/null 2>&1
+                confirm "GPU (NVIDIA) -> Default Adaptive Mode"
+            fi
+            ;;
+        generic|*)
+            notify "GPU_SETUP is set to generic or unsupported ($GPU_SETUP); skipping hardware vendor clock tweaks."
+            ;;
+    esac
+}
+
+manage_system_tuning() {
+    case "$1" in
+        on|all_on)
+            manage_gpu "on"
+            manage_wifi "on"
+            confirm "System Tuning -> All Performance Tuneables Enabled"
+            ;;
+        off|all_off)
+            manage_gpu "off"
+            manage_wifi "off"
+            confirm "System Tuning -> Default Performance Tuneables Restored"
+            ;;
+        gpu_on)   manage_gpu "on" ;;
+        gpu_off)  manage_gpu "off" ;;
+        wifi_on)  manage_wifi "on" ;;
+        wifi_off) manage_wifi "off" ;;
+        *)        warn "Unknown System Tuning option: $1" ;;
+    esac
+}
+
+# --------------------------
+# eBPF SCHEDULER MODULE
+# --------------------------
+
+start_scheduler() {
+    local sched="$1"
+
+    if command -v scxctl &>/dev/null; then
+        case "$sched" in
+            lavd)
+                notify "Engaging Performance Mode..."
+                scxctl stop >/dev/null 2>&1
+                sleep 0.2
+                scxctl start --sched lavd --args="--performance" >/dev/null 2>&1
+                confirm "Scheduler -> lavd (Args: --performance)"
+                notify "Performance Mode -> ACTIVE"
+                ;;
+            bpfland)
+                notify "Engaging Performance Mode..."
+                scxctl stop >/dev/null 2>&1
+                sleep 0.2
+                scxctl start --sched bpfland --args="-m,performance,-s,5000" >/dev/null 2>&1
+                confirm "Scheduler -> bpfland (Args: -m,performance,-s,5000)"
+                notify "Performance Mode -> ACTIVE"
+                ;;
+            off)
+                scxctl stop >/dev/null 2>&1
+                confirm "Scheduler -> Off"
+                notify "Normal Mode -> ACTIVE"
+                ;;
+            *)
+                echo "Choose either the bpfland or lavd cpu task schedulers, or off!"
+                ;;
+        esac
+    else
+        warn "scxctl utility not found in PATH."
+    fi
+}
+
+# --------------------------
+# REALTIME PRIORITIES MODULE
+# --------------------------
+
+manage_pipewire() {
+    local sw_pids
+    sw_pids=$(pgrep -u "$REAL_USER" -x "pipewire|wireplumber|pipewire-pulse")
+
+    if [[ "$1" == "on" ]]; then
+        if [[ -n "$sw_pids" ]]; then
+            for pid in $sw_pids; do
+                chrt -f -p "$RT_PRIO_PIPEWIRE" "$pid" 2>/dev/null
+            done
+            confirm "Audio Stack -> Software RT Priority $RT_PRIO_PIPEWIRE Applied"
+        fi
+    else
+        if [[ -n "$sw_pids" ]]; then
+            for pid in $sw_pids; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "Audio Stack -> Default Priority Restored"
+        fi
+    fi
+}
+
+manage_soundcards() {
+    local sound_irqs
+    sound_irqs=$(pgrep -f "irq/.*(snd_hda_intel|snd_acp)")
+
+    if [[ "$1" == "on" ]]; then
+        if [[ -n "$sound_irqs" ]]; then
+            for pid in $sound_irqs; do
+                if [[ -n "$RT_PRIO_SOUND" && "$RT_PRIO_SOUND" -gt 0 ]]; then
+                    chrt -f -p "$RT_PRIO_SOUND" "$pid" 2>/dev/null
+                else
+                    chrt -o -p 0 "$pid" 2>/dev/null
+                fi
+            done
+            confirm "Onboard Sound -> RT Priority $RT_PRIO_SOUND Applied"
+        fi
+    else
+        if [[ -n "$sound_irqs" ]]; then
+            for pid in $sound_irqs; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "Onboard Sound -> Default Priority Restored"
+        fi
+    fi
+}
+
+manage_usb() {
+    local pids
+    pids=$(pgrep -f "xhci")
+    if [[ -f "/sys/module/usbcore/parameters/autosuspend" ]]; then
+        if [[ "$1" == "on" ]]; then
+            echo -1 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+            for pid in $pids; do
+                if [[ "$RT_PRIO_USB" -gt 0 ]]; then
+                    chrt -f -p "$RT_PRIO_USB" "$pid" 2>/dev/null
+                else
+                    chrt -o -p 0 "$pid" 2>/dev/null
+                fi
+            done
+            confirm "USB -> RT Priority $RT_PRIO_USB & Autosuspend -1"
+        else
+            echo 2 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+            for pid in $pids; do
+                chrt -o -p 0 "$pid" 2>/dev/null
+            done
+            confirm "USB -> Default states restored"
+        fi
+    else
+        confirm "${RED}ERROR: USB autosuspend parameter config file not found.${NC}"
+    fi
+}
+
+manage_rt_routing() {
+    case "$1" in
+        on|all_on)
+            manage_pipewire "on"
+            manage_soundcards "on"
+            manage_usb "on"
+            ;;
+        off|all_off)
+            manage_pipewire "off"
+            manage_soundcards "off"
+            manage_usb "off"
+            ;;
+        sound_on)  manage_soundcards "on" ;;
+        sound_off) manage_soundcards "off" ;;
+        usb_on)    manage_usb "on" ;;
+        usb_off)   manage_usb "off" ;;
+        pw_on)     manage_pipewire "on" ;;
+        pw_off)    manage_pipewire "off" ;;
+        *)         warn "Unknown RT option: $1" ;;
+    esac
+}
+
+# --------------------------
 # CONFIG DETAILS / MONITORING MODULE
 # --------------------------
 
 display_config_details() {
-    notify "Gathering System & Audio Configuration Details..."
+    notify "Gathering System, eBPF, GPU & Audio Configuration Details..."
 
     echo -e "\n${YLW}=== SYSTEM & KERNEL ENVIRONMENT ===${NC}"
     echo -e "${GRN}Active User:${NC} $REAL_USER (UID: $USER_UID)"
@@ -247,14 +474,97 @@ display_config_details() {
     fi
     echo -e "${GRN}Kernel:${NC} $(uname -r)"
 
-    # Preemption state
     local preempt_mode="Unknown"
     if [[ -f /sys/kernel/debug/sched/preempt ]]; then
         preempt_mode=$(cat /sys/kernel/debug/sched/preempt)
     fi
     echo -e "${GRN}Kernel Preemption Mode:${NC} $preempt_mode"
 
+    # GPU Power & Driver State
+    echo -e "\n${YLW}=== GPU STATUS & TUNING ===${NC}"
+    echo -e "${GRN}Configured GPU Setup Type:${NC} $GPU_SETUP"
+    case "$GPU_SETUP" in
+        amd)
+            for dev in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
+                if [[ -f "$dev" ]]; then
+                    echo -e "${GRN}AMD DPM Performance Level ($dev):${NC} $(cat "$dev")"
+                fi
+            done
+            ;;
+        intel)
+            for dev in /sys/class/drm/card*/gt/gt*/rps_max_freq_mhz; do
+                if [[ -f "$dev" ]]; then
+                    echo -e "${GRN}Intel Max Clock Target ($dev):${NC} $(cat "$dev") MHz"
+                fi
+            done
+            ;;
+        nvidia)
+            if command -v nvidia-smi &>/dev/null; then
+                local nv_perf
+                nv_perf=$(nvidia-smi --query-gpu=pstate,power.draw --format=csv,noheader 2>/dev/null || echo "Unable to query")
+                echo -e "${GRN}NVIDIA GPU P-State / Power Draw:${NC} $nv_perf"
+            fi
+            ;;
+        *)
+            echo -e "${GRN}Generic GPU driver status active.${NC}"
+            ;;
+    esac
+
+    # Network / WiFi Power Save State
+    echo -e "\n${YLW}=== NETWORK & WIRELESS TUNING ===${NC}"
+    if command -v iw &>/dev/null; then
+        for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
+            local ps_val
+            ps_val=$(iw dev "$dev" get power_save 2>/dev/null | awk '{print $3}' || echo "unknown")
+            echo -e "${GRN}WiFi Interface ($dev) Power Save:${NC} $ps_val"
+        done
+    else
+        echo -e "${RED}iw tool not found.${NC}"
+    fi
+
+    # eBPF SCX Scheduler State
+    echo -e "\n${YLW}=== eBPF SCHEDULER (SCX) ===${NC}"
+    if command -v scxctl &>/dev/null; then
+        local current_sched="Off (Default Kernel Scheduler)"
+        if [[ -f /sys/kernel/sched_ext/root/ops ]]; then
+            current_sched=$(cat /sys/kernel/sched_ext/root/ops 2>/dev/null)
+        elif [[ -f /sys/kernel/sched_ext/state ]]; then
+            current_sched=$(cat /sys/kernel/sched_ext/state 2>/dev/null)
+        elif pgrep -f "scx_lavd" &>/dev/null; then
+            current_sched="scx_lavd (active)"
+        elif pgrep -f "scx_bpfland" &>/dev/null; then
+            current_sched="scx_bpfland (active)"
+        fi
+        echo -e "${GRN}Current Scheduler:${NC} $current_sched"
+    else
+        echo -e "${RED}scxctl utility not found in PATH.${NC}"
+    fi
+
+    # USB Autosuspend State
+    echo -e "\n${YLW}=== USB POWER & CONTROLLER STATUS ===${NC}"
+    if [[ -f "/sys/module/usbcore/parameters/autosuspend" ]]; then
+        local usb_auto
+        usb_auto=$(cat /sys/module/usbcore/parameters/autosuspend 2>/dev/null)
+        echo -e "${GRN}USB Autosuspend Parameter:${NC} $usb_auto (-1 = disabled, 2 = enabled)"
+    else
+        echo -e "${RED}USB autosuspend configuration path not found.${NC}"
+    fi
+
+    # Onboard Sound Card IRQ Threads
+    echo -e "\n${YLW}=== ONBOARD SOUND CARD IRQ THREADS ===${NC}"
+    echo -e "------------------------------------------------------------"
+    printf "  %-10s | %-10s | %-30s\n" "PID" "RT PRIO" "COMMAND"
+    echo -e "------------------------------------------------------------"
+    ps -eo pid,rtprio,comm | grep -iE "^ *[0-9]+ +([0-9]+|-) +.*irq/.*(snd_hda_intel|snd_acp)" | while read -r pid rtprio comm; do
+        if [[ "$rtprio" != "-" ]]; then
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "$rtprio" "$comm"
+        else
+            printf "  %-10s | %-10s | %-30s\n" "$pid" "0 (TS)" "$comm"
+        fi
+    done
+
     # Limits & Group memberships
+    echo -e "\n${YLW}=== LIMITS & GROUPS ===${NC}"
     echo -e "${GRN}User Groups:${NC} $(id -Gn "$REAL_USER")"
     echo -e "${GRN}RT Priority Limit (ulimit -r):${NC} $(ulimit -r)"
     echo -e "${GRN}Memlock Limit (ulimit -l):${NC} $(ulimit -l)"
@@ -318,89 +628,6 @@ display_config_details() {
 }
 
 # --------------------------
-# HARDWARE & REALTIME PRIORITIES MODULES
-# --------------------------
-
-manage_pipewire() {
-    local sw_pids
-    sw_pids=$(pgrep -u "$REAL_USER" -x "pipewire|wireplumber|pipewire-pulse")
-
-    if [[ "$1" == "on" ]]; then
-        if [[ -n "$sw_pids" ]]; then
-            for pid in $sw_pids; do
-                chrt -f -p "$RT_PRIO_PIPEWIRE" "$pid" 2>/dev/null
-            done
-            confirm "Audio Stack -> Software RT Priority $RT_PRIO_PIPEWIRE Applied"
-        fi
-    else
-        if [[ -n "$sw_pids" ]]; then
-            for pid in $sw_pids; do
-                chrt -o -p 0 "$pid" 2>/dev/null
-            done
-            confirm "Audio Stack -> Default Priority Restored"
-        fi
-    fi
-}
-
-manage_soundcards() {
-    local sound_irqs
-    sound_irqs=$(pgrep -f "irq/.*(snd_hda_intel|snd_acp|snd_usb_audio)")
-
-    if [[ "$1" == "on" ]]; then
-        if [[ -n "$sound_irqs" ]]; then
-            for pid in $sound_irqs; do
-                if [[ -n "$RT_PRIO_SOUND" && "$RT_PRIO_SOUND" -gt 0 ]]; then
-                    chrt -f -p "$RT_PRIO_SOUND" "$pid" 2>/dev/null
-                else
-                    chrt -o -p 0 "$pid" 2>/dev/null
-                fi
-            done
-            confirm "Onboard Sound -> RT Priority $RT_PRIO_SOUND Applied"
-        fi
-    else
-        if [[ -n "$sound_irqs" ]]; then
-            for pid in $sound_irqs; do
-                chrt -o -p 0 "$pid" 2>/dev/null
-            done
-            confirm "Onboard Sound -> Default Priority Restored"
-        fi
-    fi
-}
-
-manage_usb() {
-    local pids
-    pids=$(pgrep -f "xhci")
-    if [[ -f "/sys/module/usbcore/parameters/autosuspend" ]]; then
-        if [[ "$1" == "on" ]]; then
-            echo -1 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
-            for pid in $pids; do
-                if [[ "$RT_PRIO_USB" -gt 0 ]]; then
-                    chrt -f -p "$RT_PRIO_USB" "$pid" 2>/dev/null
-                else
-                    chrt -o -p 0 "$pid" 2>/dev/null
-                fi
-            done
-            confirm "USB -> RT Priority $RT_PRIO_USB & Autosuspend Disabled"
-        else
-            echo 2 | tee /sys/module/usbcore/parameters/autosuspend >/dev/null
-            for pid in $pids; do
-                chrt -o -p 0 "$pid" 2>/dev/null
-            done
-            confirm "USB -> Default states restored"
-        fi
-    else
-        warn "USB autosuspend configuration path not found."
-    fi
-}
-
-manage_rt_all() {
-    local state="$1"
-    manage_pipewire "$state"
-    manage_soundcards "$state"
-    manage_usb "$state"
-}
-
-# --------------------------
 # SYSTEM SETUP & UNINSTALL MODULES
 # --------------------------
 
@@ -456,7 +683,6 @@ uninstall_bazzite_system() {
 
     log_msg "Reverting Bazzite real-time & audio configuration..."
 
-    # 1. Remove limits file
     local limits_target="/etc/security/limits.d/99-realtime.conf"
     if [[ -f "$limits_target" ]]; then
         sudo rm -f "$limits_target"
@@ -465,13 +691,11 @@ uninstall_bazzite_system() {
         log_msg "No limits file found at $limits_target"
     fi
 
-    # 2. Remove user from realtime group if present
     if getent group realtime >/dev/null; then
         log_msg "Removing user $REAL_USER from group 'realtime'..."
         sudo gpasswd -d "$REAL_USER" realtime 2>/dev/null || true
     fi
 
-    # 3. Revert kernel arguments (preempt=full and threadirqs)
     log_msg "Checking low-latency kernel arguments (cmdline)..."
     local current_kargs
     current_kargs=$(rpm-ostree kargs 2>/dev/null || echo "")
@@ -651,7 +875,6 @@ yabridge_get_paths() {
         return 1
     fi
 
-    # Parse out strings inside plugin_dirs array from config.toml
     sed -n '/plugin_dirs = \[/,/\]/p' "$config_file" | grep -E "^\s*['\"]" | sed -E "s/^\s*['\"]([^'\"]+)['\"],?/\1/"
 }
 
@@ -689,7 +912,9 @@ yabridge_sync() {
 RUN_GUI=true
 DO_SETUP=false
 DO_UNINSTALL=false
+SCHED_VAL=""
 RT_VAL=""
+TUNING_VAL=""
 QUANTUM_VAL=""
 RATE_VAL=""
 LAUNCH_BIN=""
@@ -713,8 +938,18 @@ while [[ $# -gt 0 ]]; do
             RUN_GUI=false
             shift
             ;;
+        -sc|--sched)
+            SCHED_VAL="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
         -r|--rt)
             RT_VAL="$2"
+            RUN_GUI=false
+            shift 2
+            ;;
+        -t|--tuning)
+            TUNING_VAL="$2"
             RUN_GUI=false
             shift 2
             ;;
@@ -783,8 +1018,14 @@ if [ "$RUN_GUI" = false ]; then
     if [ "$DO_UNINSTALL" = true ]; then
         uninstall_bazzite_system
     fi
+    if [ -n "$SCHED_VAL" ]; then
+        start_scheduler "$SCHED_VAL"
+    fi
     if [ -n "$RT_VAL" ]; then
-        manage_rt_all "$RT_VAL"
+        manage_rt_routing "$RT_VAL"
+    fi
+    if [ -n "$TUNING_VAL" ]; then
+        manage_system_tuning "$TUNING_VAL"
     fi
     if [ -n "$LAUNCH_BIN" ]; then
         launch_app_pw_latency "$LAUNCH_BIN" "${QUANTUM_VAL:-128}" "${RATE_VAL:-48000}"
@@ -817,9 +1058,11 @@ fi
 # --------------------------
 
 while true; do
-    CHOICE=$(gui_menu "Bazzite Audio Session Manager" "Choose an action from the menu below:" \
+    CHOICE=$(gui_menu "Bazzite Audio & System Session Manager" "Choose an action from the menu below:" \
         "setup"          "Initial Setup Options" \
+        "sched"          "Change Schedulers" \
         "rt"             "Set RT Priorities" \
+        "tuning"         "System Tuning" \
         "pipewire"       "Pipewire Session Settings" \
         "launch_app"     "Launch Application (with PipeWire Latency)" \
         "pipeasio"       "PipeASIO Launch" \
@@ -845,14 +1088,58 @@ while true; do
             esac
             ;;
 
+        sched)
+            SCHED_CHOICE=$(gui_menu "Change eBPF Schedulers" "Select eBPF scheduler action:" \
+                "lavd"    "Start LAVD" \
+                "bpfland" "Start BPFLAND" \
+                "off"     "Stop")
+
+            case "$SCHED_CHOICE" in
+                lavd)    launch_in_terminal "sudo '$SCRIPT_PATH' --sched lavd" "Start LAVD Scheduler" ;;
+                bpfland) launch_in_terminal "sudo '$SCRIPT_PATH' --sched bpfland" "Start BPFLAND Scheduler" ;;
+                off)     launch_in_terminal "sudo '$SCRIPT_PATH' --sched off" "Stop eBPF Scheduler" ;;
+            esac
+            ;;
+
         rt)
             RT_CHOICE=$(gui_menu "Set RT Priorities" "Configure real-time scheduling priorities:" \
-                "rt_on"  "Realtime scheduling" \
-                "rt_off" "Default scheduling")
+                "all_on"    "Enable All RT Priorities (PipeWire, Sound, USB)" \
+                "all_off"   "Disable All RT Priorities" \
+                "sound_on"  "Onboard Sound -> RT Priority On" \
+                "sound_off" "Onboard Sound -> Default Priority" \
+                "usb_on"    "USB Controllers -> RT Priority & Autosuspend Off" \
+                "usb_off"   "USB Controllers -> Default State" \
+                "pw_on"     "PipeWire Audio Stack -> RT Priority On" \
+                "pw_off"    "PipeWire Audio Stack -> Default Priority")
 
             case "$RT_CHOICE" in
-                rt_on)  launch_in_terminal "sudo '$SCRIPT_PATH' --rt on" "Enable Realtime Scheduling" ;;
-                rt_off) launch_in_terminal "sudo '$SCRIPT_PATH' --rt off" "Restore Default Scheduling" ;;
+                all_on)    launch_in_terminal "sudo '$SCRIPT_PATH' --rt on" "Enable All Realtime Priorities" ;;
+                all_off)   launch_in_terminal "sudo '$SCRIPT_PATH' --rt off" "Restore All Default Priorities" ;;
+                sound_on)  launch_in_terminal "sudo '$SCRIPT_PATH' --rt sound_on" "Enable Soundcard RT Priority" ;;
+                sound_off) launch_in_terminal "sudo '$SCRIPT_PATH' --rt sound_off" "Restore Soundcard Default Priority" ;;
+                usb_on)    launch_in_terminal "sudo '$SCRIPT_PATH' --rt usb_on" "Enable USB RT Priority" ;;
+                usb_off)   launch_in_terminal "sudo '$SCRIPT_PATH' --rt usb_off" "Restore USB Default State" ;;
+                pw_on)     launch_in_terminal "sudo '$SCRIPT_PATH' --rt pw_on" "Enable PipeWire RT Priority" ;;
+                pw_off)    launch_in_terminal "sudo '$SCRIPT_PATH' --rt pw_off" "Restore PipeWire Default Priority" ;;
+            esac
+            ;;
+
+        tuning)
+            TUNING_CHOICE=$(gui_menu "System Tuning Options" "Select system hardware tuning action:" \
+                "all_on"   "Enable All System Tuning (GPU Performance & WiFi Low Latency)" \
+                "all_off"  "Restore All System Tuning Defaults" \
+                "gpu_on"   "GPU -> Performance Mode" \
+                "gpu_off"  "GPU -> Default Mode" \
+                "wifi_on"  "WiFi -> Low Latency (Power Save Disabled)" \
+                "wifi_off" "WiFi -> Default Power Save State")
+
+            case "$TUNING_CHOICE" in
+                all_on)   launch_in_terminal "sudo '$SCRIPT_PATH' --tuning on" "Enable All System Tuning" ;;
+                all_off)  launch_in_terminal "sudo '$SCRIPT_PATH' --tuning off" "Restore System Tuning Defaults" ;;
+                gpu_on)   launch_in_terminal "sudo '$SCRIPT_PATH' --tuning gpu_on" "GPU Performance Mode" ;;
+                gpu_off)  launch_in_terminal "sudo '$SCRIPT_PATH' --tuning gpu_off" "GPU Default Mode" ;;
+                wifi_on)  launch_in_terminal "sudo '$SCRIPT_PATH' --tuning wifi_on" "Disable WiFi Power Save" ;;
+                wifi_off) launch_in_terminal "sudo '$SCRIPT_PATH' --tuning wifi_off" "Enable WiFi Power Save" ;;
             esac
             ;;
 

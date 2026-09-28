@@ -122,10 +122,8 @@ WATCHER_PID=$!
 
 # Execute Gamescope with process replacement
 if [[ "$ENABLE_HDR" == "0" ]]; then
-    echo "${GS_ARGS[@]}" "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}"
     gamescope "${GS_ARGS[@]}" -- "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}" &>/dev/null
 elif [[ "$ENABLE_HDR" == "1" ]]; then
-    echo "${GS_ARGS[@]}" "${HDR_ARGS[@]}" "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}"
     gamescope "${GS_ARGS[@]}" "${HDR_ARGS[@]}" -- "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}" &>/dev/null
 else
     echo "Error: Invalid ENABLE_HDR value '$ENABLE_HDR'. Must be 0 or 1." >&2
