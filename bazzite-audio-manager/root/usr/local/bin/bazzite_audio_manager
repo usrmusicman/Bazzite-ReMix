@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # Bazzite & Linux Gamemode Audio / System Manager
-# High-Performance Audio, Real-Time Scheduling, GPU & Hardware Tuning Suite
+# High-Performance Audio, GPU & Hardware Tuning Suite
 # ==============================================================================
 
 # --------------------------
@@ -66,7 +66,6 @@ show_help() {
     echo "Options:"
     echo "  -s, --setup, --install             Execute initial Bazzite pro-audio setup"
     echo "  -u, --uninstall                    Undo and remove initial Bazzite pro-audio setup"
-    echo "  -sc, --sched <lavd|bpfland|off>    Manage eBPF custom CPU scheduler (SCX)"
     echo "  -r, --rt <on|off|sound_on|sound_off|usb_on|usb_off|pw_on|pw_off>"
     echo "                                     Enable or disable real-time scheduling priorities"
     echo "  -t, --tuning <on|off|gpu_on|gpu_off|wifi_on|wifi_off>"
@@ -79,7 +78,7 @@ show_help() {
     echo "  --yabridge-add <dir_path>          Add plugin path to yabridgectl"
     echo "  --yabridge-rm <dir_path>          Remove plugin path from yabridgectl"
     echo "  --yabridge-sync                    Synchronize yabridge plugin bridges"
-    echo "  -m, --config-details               Display hardware, audio stack, GPU, eBPF & yabridge status"
+    echo "  -m, --config-details               Display hardware, audio stack, GPU & yabridge status"
     echo "  -h, --help                         Show this help menu"
 }
 
@@ -320,45 +319,6 @@ manage_system_tuning() {
 }
 
 # --------------------------
-# eBPF SCHEDULER MODULE
-# --------------------------
-
-start_scheduler() {
-    local sched="$1"
-
-    if command -v scxctl &>/dev/null; then
-        case "$sched" in
-            lavd)
-                notify "Engaging Performance Mode..."
-                scxctl stop >/dev/null 2>&1
-                sleep 0.2
-                scxctl start --sched lavd --args="--performance" >/dev/null 2>&1
-                confirm "Scheduler -> lavd (Args: --performance)"
-                notify "Performance Mode -> ACTIVE"
-                ;;
-            bpfland)
-                notify "Engaging Performance Mode..."
-                scxctl stop >/dev/null 2>&1
-                sleep 0.2
-                scxctl start --sched bpfland --args="-m,performance,-s,5000" >/dev/null 2>&1
-                confirm "Scheduler -> bpfland (Args: -m,performance,-s,5000)"
-                notify "Performance Mode -> ACTIVE"
-                ;;
-            off)
-                scxctl stop >/dev/null 2>&1
-                confirm "Scheduler -> Off"
-                notify "Normal Mode -> ACTIVE"
-                ;;
-            *)
-                echo "Choose either the bpfland or lavd cpu task schedulers, or off!"
-                ;;
-        esac
-    else
-        warn "scxctl utility not found in PATH."
-    fi
-}
-
-# --------------------------
 # REALTIME PRIORITIES MODULE
 # --------------------------
 
@@ -461,7 +421,7 @@ manage_rt_routing() {
 # --------------------------
 
 display_config_details() {
-    notify "Gathering System, eBPF, GPU & Audio Configuration Details..."
+    notify "Gathering System, GPU & Audio Configuration Details..."
 
     echo -e "\n${YLW}=== SYSTEM & KERNEL ENVIRONMENT ===${NC}"
     echo -e "${GRN}Active User:${NC} $REAL_USER (UID: $USER_UID)"
@@ -520,24 +480,6 @@ display_config_details() {
         done
     else
         echo -e "${RED}iw tool not found.${NC}"
-    fi
-
-    # eBPF SCX Scheduler State
-    echo -e "\n${YLW}=== eBPF SCHEDULER (SCX) ===${NC}"
-    if command -v scxctl &>/dev/null; then
-        local current_sched="Off (Default Kernel Scheduler)"
-        if [[ -f /sys/kernel/sched_ext/root/ops ]]; then
-            current_sched=$(cat /sys/kernel/sched_ext/root/ops 2>/dev/null)
-        elif [[ -f /sys/kernel/sched_ext/state ]]; then
-            current_sched=$(cat /sys/kernel/sched_ext/state 2>/dev/null)
-        elif pgrep -f "scx_lavd" &>/dev/null; then
-            current_sched="scx_lavd (active)"
-        elif pgrep -f "scx_bpfland" &>/dev/null; then
-            current_sched="scx_bpfland (active)"
-        fi
-        echo -e "${GRN}Current Scheduler:${NC} $current_sched"
-    else
-        echo -e "${RED}scxctl utility not found in PATH.${NC}"
     fi
 
     # USB Autosuspend State
@@ -912,7 +854,6 @@ yabridge_sync() {
 RUN_GUI=true
 DO_SETUP=false
 DO_UNINSTALL=false
-SCHED_VAL=""
 RT_VAL=""
 TUNING_VAL=""
 QUANTUM_VAL=""
@@ -937,11 +878,6 @@ while [[ $# -gt 0 ]]; do
             DO_UNINSTALL=true
             RUN_GUI=false
             shift
-            ;;
-        -sc|--sched)
-            SCHED_VAL="$2"
-            RUN_GUI=false
-            shift 2
             ;;
         -r|--rt)
             RT_VAL="$2"
@@ -1018,9 +954,6 @@ if [ "$RUN_GUI" = false ]; then
     if [ "$DO_UNINSTALL" = true ]; then
         uninstall_bazzite_system
     fi
-    if [ -n "$SCHED_VAL" ]; then
-        start_scheduler "$SCHED_VAL"
-    fi
     if [ -n "$RT_VAL" ]; then
         manage_rt_routing "$RT_VAL"
     fi
@@ -1060,7 +993,6 @@ fi
 while true; do
     CHOICE=$(gui_menu "Bazzite Audio & System Session Manager" "Choose an action from the menu below:" \
         "setup"          "Initial Setup Options" \
-        "sched"          "Change Schedulers" \
         "rt"             "Set RT Priorities" \
         "tuning"         "System Tuning" \
         "pipewire"       "Pipewire Session Settings" \
@@ -1085,19 +1017,6 @@ while true; do
                         launch_in_terminal "sudo '$SCRIPT_PATH' --uninstall" "Uninstall System Setup"
                     fi
                     ;;
-            esac
-            ;;
-
-        sched)
-            SCHED_CHOICE=$(gui_menu "Change eBPF Schedulers" "Select eBPF scheduler action:" \
-                "lavd"    "Start LAVD" \
-                "bpfland" "Start BPFLAND" \
-                "off"     "Stop")
-
-            case "$SCHED_CHOICE" in
-                lavd)    launch_in_terminal "sudo '$SCRIPT_PATH' --sched lavd" "Start LAVD Scheduler" ;;
-                bpfland) launch_in_terminal "sudo '$SCRIPT_PATH' --sched bpfland" "Start BPFLAND Scheduler" ;;
-                off)     launch_in_terminal "sudo '$SCRIPT_PATH' --sched off" "Stop eBPF Scheduler" ;;
             esac
             ;;
 
