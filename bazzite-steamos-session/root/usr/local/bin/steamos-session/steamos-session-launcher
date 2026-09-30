@@ -7,6 +7,11 @@ if [[ -z "${TERM:-}" || "$TERM" == "unknown" ]]; then
     export TERM=linux
 fi
 
+# Ensure XDG environment context exists for raw TTY execution
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
 # Define path for user-specific session configuration overrides
 STEAMOS_SESSION_CONFIG="$HOME/.config/steamos-session/steamos-session-config"
 
@@ -75,13 +80,7 @@ GS_ARGS=(
   "--force-grab-cursor"        # Restrict cursor within the compositor window
   "--grab"                     # Lock keyboard/mouse focus
   "--steam"                    # Enable Steam-specific compositor hooks
-  "--xwayland-count" "2"       # Allocate Xwayland instances for Steam UI
 )
-
-# Only append --mangoapp if the binary exists on the host system
-if command -v mangoapp &>/dev/null; then
-    GS_ARGS+=("--mangoapp")
-fi
 
 # High Dynamic Range (HDR) flags passed to Gamescope when HDR is toggled
 HDR_ARGS=(
@@ -90,10 +89,6 @@ HDR_ARGS=(
   "--hdr-itm-sdr-nits=$HDR_TONEMAP"
   "--hdr-itm-target-nits=$HDR_MAX"
 )
-
-# Expose multi-Xwayland support and environment hints to Steam processes
-export STEAM_MULTIPLE_XWAYLANDS=1
-export XDG_CURRENT_DESKTOP="SteamOS"
 
 # Gracefully shut down Steam if an instance is already running
 if pgrep -x steam &>/dev/null || pgrep -f "com.valvesoftware.Steam" &>/dev/null; then
@@ -120,12 +115,23 @@ fi
 ) &
 WATCHER_PID=$!
 
-# Execute Gamescope with process replacement
-if [[ "$ENABLE_HDR" == "0" ]]; then
-    gamescope "${GS_ARGS[@]}" -- "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}" &>/dev/null
-elif [[ "$ENABLE_HDR" == "1" ]]; then
-    gamescope "${GS_ARGS[@]}" "${HDR_ARGS[@]}" -- "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}" &>/dev/null
-else
+# Build final execution array dynamically based on options
+LAUNCH_CMD=("gamescope" "${GS_ARGS[@]}")
+
+if [[ "$ENABLE_HDR" == "1" ]]; then
+    LAUNCH_CMD+=("${HDR_ARGS[@]}")
+elif [[ "$ENABLE_HDR" != "0" ]]; then
     echo "Error: Invalid ENABLE_HDR value '$ENABLE_HDR'. Must be 0 or 1." >&2
     exit 1
+fi
+
+LAUNCH_CMD+=("--" "${STEAM_CMD[@]}" "${STEAMOS_FLAGS[@]}")
+
+echo "==> Initializing Gamescope Interface on TTY..." >&2
+
+# Execute Gamescope with process replacement, implementing session dbus context if missing
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    exec dbus-run-session -- "${LAUNCH_CMD[@]}"
+else
+    exec "${LAUNCH_CMD[@]}"
 fi

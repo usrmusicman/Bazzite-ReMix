@@ -1,14 +1,14 @@
 [Desktop Entry]
 Categories=System;
-Comment[en_CA]=Steam in Big Picture Mode using GamepadUI
-Comment=Steam in Big Picture Mode using GamepadUI
-Exec=/usr/local/bin/steamos-session/steamos-session-launcher
+Comment[en_CA]=Log out of the current KDE Plasma session
+Comment=Log out of the current KDE Plasma session
+Exec=qdbus org.kde.Shutdown /Shutdown logout
 GenericName[en_CA]=
 GenericName=
 Icon=steamdeck-gaming-return
 MimeType=
-Name[en_CA]=SteamOS 3 Session
-Name=SteamOS 3 Session
+Name[en_CA]=Return to GamepadUI (TTY)
+Name=Return to GamepadUI (TTY)
 Path=
 StartupNotify=true
 Terminal=false

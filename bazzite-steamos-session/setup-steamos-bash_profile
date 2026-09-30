@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Define path locations
+BASH_PROFILE="$HOME/.bash_profile"
+BACKUP_PROFILE="$HOME/.bash_profile.bak"
+
+# Determine the directory where this setup script lives to find the relative source path
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_PROFILE="${SCRIPT_DIR}/root/usr/local/etc/skel/steamos-session/.bash_profile"
+
+echo "==> Initializing SteamOS Bash Profile setup..."
+
+# 1. Verify the source file actually exists before making modifications
+if [[ ! -f "$SOURCE_PROFILE" ]]; then
+    echo "Error: Source profile file not found at:" >&2
+    echo "       '$SOURCE_PROFILE'" >&2
+    echo "       Please ensure this script is run from the directory containing the 'root' folder." >&2
+    exit 1
+fi
+
+# 2. Check if a backup file already exists to preserve the original history
+if [[ -f "$BACKUP_PROFILE" ]]; then
+    echo "Notice: A backup file already exists at '$BACKUP_PROFILE'."
+    echo "        Skipping backup process to prevent overwriting your original profile."
+else
+    # 3. If no backup exists, check if the current active profile can be backed up
+    if [[ -f "$BASH_PROFILE" ]]; then
+        echo "Creating secure backup: '$BASH_PROFILE' -> '$BACKUP_PROFILE'"
+        mv "$BASH_PROFILE" "$BACKUP_PROFILE"
+    else
+        echo "Notice: No existing '$BASH_PROFILE' found to back up."
+    fi
+fi
+
+# 4. Copy the SteamOS target profile into place for the current interactive user
+echo "Deploying new layout: '$SOURCE_PROFILE' -> '$BASH_PROFILE'"
+cp "$SOURCE_PROFILE" "$BASH_PROFILE"
+
+echo "==> Successfully configured your TTY profile environment!"

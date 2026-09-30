@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories=System;
+Comment[en_CA]=Steam in Big Picture Mode using GamepadUI
+Comment=Steam in Big Picture Mode using GamepadUI
+Exec=/usr/local/bin/steamos-session/steamos-session-launcher
+GenericName[en_CA]=
+GenericName=
+Icon=steamdeck-gaming-return
+MimeType=
+Name[en_CA]=Return to GamepadUI (Desktop)
+Name=Return to GamepadUI (Desktop)
+Path=
+StartupNotify=true
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

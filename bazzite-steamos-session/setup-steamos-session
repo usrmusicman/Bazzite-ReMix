@@ -12,6 +12,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${SCRIPT_DIR}/root"
 
+# Supported target Display Managers to check
+DM_SERVICES=("gdm.service" "plasmalogin.service" "sddm.service" "lightdm.service")
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTION]
@@ -22,6 +25,17 @@ Options:
   -h, --help        Display this help message
 EOF
   exit 1
+}
+
+# Helper to find installed display manager services
+get_installed_dms() {
+  local installed=()
+  for dm in "${DM_SERVICES[@]}"; do
+    if systemctl list-unit-files "$dm" &>/dev/null; then
+      installed+=("$dm")
+    fi
+  done
+  echo "${installed[@]}"
 }
 
 install_session() {
@@ -40,23 +54,115 @@ install_session() {
   install -Dm755 "$SOURCE_ROOT/usr/local/bin/steamos-session/steamos-session-launcher" \
                  "/usr/local/bin/steamos-session/steamos-session-launcher"
 
-  # 3. Desktop Applications (644)
-  install -Dm644 "$SOURCE_ROOT/usr/local/share/applications/steamos3-gamepadui.desktop" \
-                 "/usr/local/share/applications/steamos3-gamepadui.desktop"
+  # 2. Desktop Applications (644)
+  install -Dm644 "$SOURCE_ROOT/usr/local/share/applications/steamos3-gamepadui-de.desktop" \
+                 "/usr/local/share/applications/steamos3-gamepadui-de.desktop"
+  install -Dm644 "$SOURCE_ROOT/usr/local/share/applications/steamos3-gamepadui-tty.desktop" \
+                 "/usr/local/share/applications/steamos3-gamepadui-tty.desktop"
+
+  # 3. Install BASH Profiles (GamepadUI) (644)
+  install -Dm644 "$SOURCE_ROOT/usr/local/etc/skel/steamos-session/.bash_profile" \
+                 "/usr/local/etc/skel/steamos-session/.bash_profile"
+
+  # 4. Configure TTY1 Autologin Override
+  echo "==> Configuring getty@tty1 autologin..."
+  REAL_USER=${SUDO_USER:-$USER}
+  OVERRIDE_DIR="/etc/systemd/system/getty@tty1.service.d"
+
+  mkdir -p "$OVERRIDE_DIR"
+  cat <<EOF > "$OVERRIDE_DIR/override.conf"
+[Service]
+ExecStart=
+ExecStart=-/usr/sbin/agetty --autologin $REAL_USER --noclear %I linux
+EOF
+
+  # 5. Detect and Mask Graphical Display Managers
+  echo "==> Detecting graphical display managers to mask..."
+  local target_dms
+  target_dms=$(get_installed_dms)
+
+  for dm in $target_dms; do
+    echo "Stopping and masking $dm..."
+    systemctl stop "$dm" || true
+    systemctl mask "$dm"
+  done
+
+  echo "==> Reloading systemd and restarting getty@tty1..."
+  systemctl daemon-reload
+  systemctl restart getty@tty1.service
 
   echo "==> Installation complete!"
+  sleep 2
+
+  echo "==> Rebooting system..."
+  systemctl reboot
 }
 
 uninstall_session() {
   echo "==> Removing installed files..."
 
-  # Remove binaries, scripts, configs, and modules
-  rm -rf /usr/local/bin/steamos-session
+  # 1. Disable, stop, and clean up the TTY1 Autologin Service override
+  if [ -d "/etc/systemd/system/getty@tty1.service.d" ]; then
+    echo "Stopping getty@tty1 service..."
+    systemctl stop getty@tty1.service || true
 
-  # Remove desktop entries
-  rm -f /usr/local/share/applications/steamos3-gamepadui.desktop
+    echo "Removing autologin systemd overrides..."
+    rm -rf /etc/systemd/system/getty@tty1.service.d
+  fi
+
+  # 2. Detect and Unmask Graphical Display Managers
+  echo "==> Detecting masked display managers to restore..."
+  local target_dms
+  target_dms=$(get_installed_dms)
+
+  for dm in $target_dms; do
+    echo "Unmasking $dm..."
+    systemctl unmask "$dm"
+    # Note: We don't start them quite yet to ensure daemon-reload processes first
+  done
+
+  # 3. Reload systemd to accurately process unmasks and overrides removal
+  echo "==> Reloading systemd configuration..."
+  systemctl daemon-reload
+
+  # 4. Safely bring up default environment states
+  systemctl start getty@tty1.service || true
+  for dm in $target_dms; do
+    # Bazzite natively enables its display manager symlink out of the box,
+    # so we just start the preferred available graphical service.
+    echo "Starting $dm graphical interface..."
+    systemctl start "$dm" || true
+  done
+
+  # 5. Remove executables directory and all nested scripts
+  if [ -d "/usr/local/bin/steamos-session" ]; then
+    echo "Removing /usr/local/bin/steamos-session..."
+    rm -rf /usr/local/bin/steamos-session
+  fi
+
+  # 6. Remove desktop application shortcut (Desktop)
+  if [ -f "/usr/local/share/applications/steamos3-gamepadui-de.desktop" ]; then
+    echo "Removing desktop application file..."
+    rm -f /usr/local/share/applications/steamos3-gamepadui-de.desktop
+  fi
+
+  # 7. Remove desktop application shortcut (TTY)
+  if [ -f "/usr/local/share/applications/steamos3-gamepadui-tty.desktop" ]; then
+    echo "Removing desktop application file..."
+    rm -f /usr/local/share/applications/steamos3-gamepadui-tty.desktop
+  fi
+
+  # 8. Remove .bash_profile (GamepadUI)
+  if [ -f "/usr/local/etc/skel/steamos-session/.bash_profile" ]; then
+    echo "Removing .bash_profile.gamepadui profile..."
+    rm -f /usr/local/etc/skel/steamos-session/.bash_profile
+  fi
 
   echo "==> Uninstallation complete!"
+  sleep 2
+
+  echo "==> Rebooting system..."
+  systemctl reboot
 }
 
 # CLI Argument Parsing
