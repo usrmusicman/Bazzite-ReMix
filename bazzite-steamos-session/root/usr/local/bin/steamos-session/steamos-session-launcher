@@ -82,6 +82,11 @@ GS_ARGS=(
   "--steam"                    # Enable Steam-specific compositor hooks
 )
 
+# Only append --mangoapp if the binary exists on the host system
+if command -v mangoapp &>/dev/null; then
+    GS_ARGS+=("--mangoapp")
+fi
+
 # High Dynamic Range (HDR) flags passed to Gamescope when HDR is toggled
 HDR_ARGS=(
   "--hdr-enabled"
